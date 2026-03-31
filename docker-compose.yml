@@ -12,6 +12,8 @@ services:
     <<: *common-config
     command: ["channels", "login", "whatsapp"]
     restart: unless-stopped
+    environment:
+      - BRIDGE_HOST=0.0.0.0
     deploy:
       resources:
         limits:
