@@ -23,3 +23,13 @@ botpy.log
 nano.*.save
 .DS_Store
 uv.lock
+
+# Runtime workspace (bevat persoonlijke gegevens, memory, sessies)
+workspace/
+
+# IDE
+.cursor/
+*.code-workspace
+
+# Node
+bridge/node_modules/

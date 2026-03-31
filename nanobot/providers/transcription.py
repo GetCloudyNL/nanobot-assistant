@@ -40,19 +40,13 @@ class GroqTranscriptionProvider:
         try:
             async with httpx.AsyncClient() as client:
                 with open(path, "rb") as f:
-                    files = {
-                        "file": (path.name, f),
-                        "model": (None, "whisper-large-v3"),
-                    }
-                    headers = {
-                        "Authorization": f"Bearer {self.api_key}",
-                    }
-
+                    headers = {"Authorization": f"Bearer {self.api_key}"}
                     response = await client.post(
                         self.api_url,
                         headers=headers,
-                        files=files,
-                        timeout=60.0
+                        files={"file": (path.name, f, "application/octet-stream")},
+                        data={"model": "whisper-large-v3"},
+                        timeout=60.0,
                     )
 
                     response.raise_for_status()

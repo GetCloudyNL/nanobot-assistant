@@ -1,6 +1,7 @@
 """WhatsApp channel implementation using Node.js bridge."""
 
 import asyncio
+import hashlib
 import json
 import mimetypes
 import os
@@ -17,6 +18,15 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import Base
+
+
+def _path_looks_like_audio(path: str) -> bool:
+    """Guess if a saved media path is voice/audio (bridge may label as [Document])."""
+    mime, _ = mimetypes.guess_type(path)
+    if mime and mime.startswith("audio/"):
+        return True
+    ext = Path(path).suffix.lower().lstrip(".")
+    return ext in ("ogg", "opus", "m4a", "mp3", "wav", "aac", "webm")
 
 
 class WhatsAppConfig(Base):
@@ -86,6 +96,13 @@ class WhatsAppChannel(BaseChannel):
     async def start(self) -> None:
         """Start the WhatsApp channel by connecting to the bridge."""
         import websockets
+
+        # Rebuild ~/.nanobot/bridge when bundled source (e.g. whatsapp.ts) changed — otherwise
+        # users keep an old bridge without voice download after upgrading nanobot.
+        try:
+            await asyncio.to_thread(_ensure_bridge_setup)
+        except Exception as e:
+            logger.warning("WhatsApp bridge sync skipped: {}", e)
 
         bridge_url = self.config.bridge_url
 
@@ -179,7 +196,7 @@ class WhatsAppChannel(BaseChannel):
             pn = data.get("pn", "")
             # New LID sytle typically:
             sender = data.get("sender", "")
-            content = data.get("content", "")
+            content = (data.get("content") or "").strip()
             message_id = data.get("id", "")
 
             if message_id:
@@ -201,16 +218,35 @@ class WhatsAppChannel(BaseChannel):
             sender_id = user_id.split("@")[0] if "@" in user_id else user_id
             logger.info("Sender {}", sender)
 
-            # Handle voice transcription if it's a voice message
-            if content == "[Voice Message]":
-                logger.info(
-                    "Voice message received from {}, but direct download from bridge is not yet supported.",
-                    sender_id,
-                )
-                content = "[Voice Message: Transcription not available for WhatsApp yet]"
+            # Media paths from bridge (images, documents, video, voice audio file)
+            media_paths = list(data.get("media") or [])
 
-            # Extract media paths (images/documents/videos downloaded by the bridge)
-            media_paths = data.get("media") or []
+            # Voice: transcribe via Groq Whisper (requires providers.groq.api_key in config)
+            treat_as_voice = content == "[Voice Message]" or (
+                content == "[Document]"
+                and media_paths
+                and _path_looks_like_audio(media_paths[0])
+            )
+            if treat_as_voice:
+                if media_paths:
+                    audio_path = media_paths[0]
+                    transcript = await self.transcribe_audio(audio_path)
+                    if transcript:
+                        content = transcript
+                        logger.info(
+                            "Voice message transcribed from {}: {}...",
+                            sender_id,
+                            transcript[:80],
+                        )
+                        media_paths = []
+                    else:
+                        content = (
+                            "[Voice Message: transcriptie mislukt — zet een Groq API key in "
+                            "config onder providers.groq.apiKey]"
+                        )
+                        media_paths = []
+                else:
+                    content = "[Voice Message: geen audiobestand ontvangen van de bridge]"
 
             # Build content tags matching Telegram's pattern: [image: /path] or [file: /path]
             if media_paths:
@@ -250,6 +286,29 @@ class WhatsAppChannel(BaseChannel):
             logger.error("WhatsApp bridge error: {}", data.get("error"))
 
 
+def _find_bridge_source() -> Path | None:
+    """Resolve bundled bridge source directory (package or repo layout)."""
+    current_file = Path(__file__)
+    pkg_bridge = current_file.parent.parent / "bridge"
+    src_bridge = current_file.parent.parent.parent / "bridge"
+    if (pkg_bridge / "package.json").exists():
+        return pkg_bridge
+    if (src_bridge / "package.json").exists():
+        return src_bridge
+    return None
+
+
+def _bridge_source_fingerprint(source: Path) -> str:
+    """Hash of bridge TS sources that affect runtime behaviour (voice, media)."""
+    h = hashlib.sha256()
+    for rel in ("src/whatsapp.ts", "src/server.ts", "package.json"):
+        p = source / rel
+        if p.exists():
+            h.update(rel.encode())
+            h.update(p.read_bytes())
+    return h.hexdigest()
+
+
 def _ensure_bridge_setup() -> Path:
     """
     Ensure the WhatsApp bridge is set up and built.
@@ -260,32 +319,29 @@ def _ensure_bridge_setup() -> Path:
     from nanobot.config.paths import get_bridge_install_dir
 
     user_bridge = get_bridge_install_dir()
-
-    if (user_bridge / "dist" / "index.js").exists():
-        return user_bridge
+    marker = user_bridge / ".bridge_src_sha256"
 
     npm_path = shutil.which("npm")
     if not npm_path:
         raise RuntimeError("npm not found. Please install Node.js >= 18.")
 
-    # Find source bridge
-    current_file = Path(__file__)
-    pkg_bridge = current_file.parent.parent / "bridge"
-    src_bridge = current_file.parent.parent.parent / "bridge"
-
-    source = None
-    if (pkg_bridge / "package.json").exists():
-        source = pkg_bridge
-    elif (src_bridge / "package.json").exists():
-        source = src_bridge
-
+    source = _find_bridge_source()
     if not source:
         raise RuntimeError(
             "WhatsApp bridge source not found. "
             "Try reinstalling: pip install --force-reinstall nanobot"
         )
 
-    logger.info("Setting up WhatsApp bridge...")
+    fingerprint = _bridge_source_fingerprint(source)
+    dist_ok = (user_bridge / "dist" / "index.js").exists()
+    if dist_ok and marker.exists():
+        try:
+            if marker.read_text(encoding="utf-8").strip() == fingerprint:
+                return user_bridge
+        except OSError:
+            pass
+
+    logger.info("Setting up WhatsApp bridge (source changed or first install)...")
     user_bridge.parent.mkdir(parents=True, exist_ok=True)
     if user_bridge.exists():
         shutil.rmtree(user_bridge)
@@ -296,6 +352,11 @@ def _ensure_bridge_setup() -> Path:
 
     logger.info("  Building...")
     subprocess.run([npm_path, "run", "build"], cwd=user_bridge, check=True, capture_output=True)
+
+    try:
+        marker.write_text(fingerprint, encoding="utf-8")
+    except OSError:
+        pass
 
     logger.info("Bridge ready")
     return user_bridge

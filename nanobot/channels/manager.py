@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any
 
 from loguru import logger
@@ -38,7 +39,7 @@ class ChannelManager:
         """Initialize channels discovered via pkgutil scan + entry_points plugins."""
         from nanobot.channels.registry import discover_all
 
-        groq_key = self.config.providers.groq.api_key
+        groq_key = self.config.providers.groq.api_key or os.environ.get("GROQ_API_KEY", "")
 
         for name, cls in discover_all().items():
             section = getattr(self.config.channels, name, None)
@@ -55,6 +56,11 @@ class ChannelManager:
                 channel = cls(section, self.bus)
                 channel.transcription_api_key = groq_key
                 self.channels[name] = channel
+                if name == "whatsapp" and not groq_key.strip():
+                    logger.warning(
+                        "WhatsApp spraakberichten: geen Groq API key — zet providers.groq.apiKey in "
+                        "~/.nanobot/config.json of export GROQ_API_KEY (https://console.groq.com)."
+                    )
                 logger.info("{} channel enabled", cls.display_name)
             except Exception as e:
                 logger.warning("{} channel not available: {}", name, e)

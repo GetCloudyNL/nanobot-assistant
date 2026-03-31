@@ -44,6 +44,8 @@ export class WhatsAppClient {
   private sock: any = null;
   private options: WhatsAppClientOptions;
   private reconnecting = false;
+  /** Shared with makeWASocket and downloadMediaMessage(ctx) — required for reupload on expired media URLs */
+  private baileysLogger = pino({ level: 'silent' });
 
   constructor(options: WhatsAppClientOptions) {
     this.options = options;
@@ -75,7 +77,6 @@ export class WhatsAppClient {
   }
 
   async connect(): Promise<void> {
-    const logger = pino({ level: 'silent' });
     const { state, saveCreds } = await useMultiFileAuthState(this.options.authDir);
     const { version } = await fetchLatestBaileysVersion();
 
@@ -85,10 +86,10 @@ export class WhatsAppClient {
     this.sock = makeWASocket({
       auth: {
         creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, logger),
+        keys: makeCacheableSignalKeyStore(state.keys, this.baileysLogger),
       },
       version,
-      logger,
+      logger: this.baileysLogger,
       printQRInTerminal: false,
       browser: ['nanobot', 'cli', VERSION],
       syncFullHistory: false,
@@ -157,13 +158,27 @@ export class WhatsAppClient {
           const path = await this.downloadMedia(msg, unwrapped.imageMessage.mimetype ?? undefined);
           if (path) mediaPaths.push(path);
         } else if (unwrapped.documentMessage) {
-          fallbackContent = '[Document]';
-          const path = await this.downloadMedia(msg, unwrapped.documentMessage.mimetype ?? undefined,
-            unwrapped.documentMessage.fileName ?? undefined);
+          const dm = unwrapped.documentMessage;
+          const docMime = dm.mimetype ?? '';
+          // Some clients send voice as document + audio/* instead of audioMessage
+          const isAudioDoc = docMime.startsWith('audio/');
+          fallbackContent = isAudioDoc ? '[Voice Message]' : '[Document]';
+          const path = await this.downloadMedia(
+            msg,
+            dm.mimetype ?? undefined,
+            dm.fileName ?? undefined,
+          );
           if (path) mediaPaths.push(path);
         } else if (unwrapped.videoMessage) {
           fallbackContent = '[Video]';
           const path = await this.downloadMedia(msg, unwrapped.videoMessage.mimetype ?? undefined);
+          if (path) mediaPaths.push(path);
+        } else if (unwrapped.audioMessage) {
+          fallbackContent = '[Voice Message]';
+          const path = await this.downloadMedia(
+            msg,
+            unwrapped.audioMessage.mimetype ?? 'audio/ogg',
+          );
           if (path) mediaPaths.push(path);
         }
 
@@ -192,7 +207,14 @@ export class WhatsAppClient {
       const mediaDir = join(this.options.authDir, '..', 'media');
       await mkdir(mediaDir, { recursive: true });
 
-      const buffer = await downloadMediaMessage(msg, 'buffer', {}) as Buffer;
+      const ctx =
+        this.sock && typeof this.sock.updateMediaMessage === 'function'
+          ? {
+              logger: this.baileysLogger,
+              reuploadRequest: this.sock.updateMediaMessage.bind(this.sock),
+            }
+          : undefined;
+      const buffer = (await downloadMediaMessage(msg, 'buffer', {}, ctx)) as Buffer;
 
       let outFilename: string;
       if (fileName) {
@@ -211,7 +233,8 @@ export class WhatsAppClient {
 
       return filepath;
     } catch (err) {
-      console.error('Failed to download media:', err);
+      const detail = err instanceof Error ? err.message : String(err);
+      console.error('Failed to download media:', detail, err);
       return null;
     }
   }
@@ -237,8 +260,12 @@ export class WhatsAppClient {
       return message.videoMessage.caption || '';
     }
 
-    // Document with optional caption
+    // Document with optional caption (voice as file → documentMessage + audio/*)
     if (message.documentMessage) {
+      const mime = message.documentMessage.mimetype ?? '';
+      if (mime.startsWith('audio/')) {
+        return '[Voice Message]';
+      }
       return message.documentMessage.caption || '';
     }
 
