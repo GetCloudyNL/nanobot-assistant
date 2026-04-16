@@ -36,6 +36,9 @@ class WhatsAppConfig(Base):
     bridge_url: str = "ws://localhost:3001"
     bridge_token: str = ""
     allow_from: list[str] = Field(default_factory=list)
+    # Optional: map phone numbers (or LIDs) to human-readable names so the agent
+    # knows who is talking. Example: {"31657571200": "Ralph van der Linden"}
+    identities: dict[str, str] = Field(default_factory=dict)
     group_policy: Literal["open", "mention"] = "open"  # "open" responds to all, "mention" only when @mentioned
 
 
@@ -256,6 +259,9 @@ class WhatsAppChannel(BaseChannel):
                     media_tag = f"[{media_type}: {p}]"
                     content = f"{content}\n{media_tag}" if content else media_tag
 
+            identities = getattr(self.config, "identities", {}) or {}
+            sender_name = identities.get(sender_id) or identities.get(user_id)
+
             await self._handle_message(
                 sender_id=sender_id,
                 chat_id=sender,  # Use full LID for replies
@@ -265,6 +271,7 @@ class WhatsAppChannel(BaseChannel):
                     "message_id": message_id,
                     "timestamp": data.get("timestamp"),
                     "is_group": data.get("isGroup", False),
+                    "sender_name": sender_name,
                 },
             )
 

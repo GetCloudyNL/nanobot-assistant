@@ -102,12 +102,24 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
 
     @staticmethod
     def _build_runtime_context(
-        channel: str | None, chat_id: str | None, timezone: str | None = None,
+        channel: str | None,
+        chat_id: str | None,
+        timezone: str | None = None,
+        sender_id: str | None = None,
+        sender_name: str | None = None,
     ) -> str:
         """Build untrusted runtime metadata block for injection before the user message."""
         lines = [f"Current Time: {current_time_str(timezone)}"]
         if channel and chat_id:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
+        if sender_name and sender_id:
+            lines.append(
+                f"Sender: {sender_name} (id: {sender_id}, verified via allowlist)"
+            )
+        elif sender_name:
+            lines.append(f"Sender: {sender_name} (verified via allowlist)")
+        elif sender_id:
+            lines.append(f"Sender ID: {sender_id} (verified via allowlist)")
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
     def _load_bootstrap_files(self) -> str:
@@ -131,9 +143,14 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
         channel: str | None = None,
         chat_id: str | None = None,
         current_role: str = "user",
+        sender_id: str | None = None,
+        sender_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
-        runtime_ctx = self._build_runtime_context(channel, chat_id, self.timezone)
+        runtime_ctx = self._build_runtime_context(
+            channel, chat_id, self.timezone,
+            sender_id=sender_id, sender_name=sender_name,
+        )
         user_content = self._build_user_content(current_message, media)
 
         # Merge runtime context and user content into a single user message
