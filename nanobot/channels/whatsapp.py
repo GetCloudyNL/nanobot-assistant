@@ -212,14 +212,25 @@ class WhatsAppChannel(BaseChannel):
         for media_path in msg.media or []:
             try:
                 mime, _ = mimetypes.guess_type(media_path)
-                payload = {
+                mime = mime or "application/octet-stream"
+                payload: dict[str, Any] = {
                     "type": "send_media",
                     "to": chat_id,
                     "filePath": media_path,
-                    "mimetype": mime or "application/octet-stream",
+                    "mimetype": mime,
                     "fileName": media_path.rsplit("/", 1)[-1],
                 }
+                if mime.startswith("audio/") and media_path.lower().endswith((".ogg", ".opus")):
+                    payload["ptt"] = True
+                logger.info(
+                    "Sending WhatsApp media to {}: path={} mime={} ptt={}",
+                    chat_id,
+                    media_path,
+                    mime,
+                    payload.get("ptt", False),
+                )
                 await self._ws.send(json.dumps(payload, ensure_ascii=False))
+                logger.debug("WhatsApp media payload dispatched to bridge")
             except Exception as e:
                 logger.error("Error sending WhatsApp media {}: {}", media_path, e)
                 raise

@@ -19,6 +19,7 @@ interface SendMediaCommand {
   mimetype: string;
   caption?: string;
   fileName?: string;
+  ptt?: boolean;
 }
 
 type BridgeCommand = SendCommand | SendMediaCommand;
@@ -109,7 +110,18 @@ export class BridgeServer {
     if (cmd.type === 'send') {
       await this.wa.sendMessage(cmd.to, cmd.text);
     } else if (cmd.type === 'send_media') {
-      await this.wa.sendMedia(cmd.to, cmd.filePath, cmd.mimetype, cmd.caption, cmd.fileName);
+      console.log(
+        `📎 send_media to=${cmd.to} path=${cmd.filePath} mime=${cmd.mimetype} ptt=${cmd.ptt ?? false}`,
+      );
+      await this.wa.sendMedia(
+        cmd.to,
+        cmd.filePath,
+        cmd.mimetype,
+        cmd.caption,
+        cmd.fileName,
+        cmd.ptt,
+      );
+      console.log(`✅ send_media delivered to=${cmd.to}`);
     }
   }
 

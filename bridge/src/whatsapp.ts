@@ -291,6 +291,7 @@ export class WhatsAppClient {
     mimetype: string,
     caption?: string,
     fileName?: string,
+    ptt?: boolean,
   ): Promise<void> {
     if (!this.sock) {
       throw new Error('Not connected');
@@ -304,7 +305,14 @@ export class WhatsAppClient {
     } else if (category === 'video') {
       await this.sock.sendMessage(to, { video: buffer, caption: caption || undefined, mimetype });
     } else if (category === 'audio') {
-      await this.sock.sendMessage(to, { audio: buffer, mimetype });
+      // For opus/ogg audio WhatsApp-style voice notes render best with ptt=true.
+      // Fall back to a regular audio attachment otherwise.
+      const audioMime = mimetype.includes('opus') ? mimetype : 'audio/ogg; codecs=opus';
+      await this.sock.sendMessage(to, {
+        audio: buffer,
+        mimetype: ptt ? audioMime : mimetype,
+        ptt: ptt === true,
+      });
     } else {
       const name = fileName || basename(filePath);
       await this.sock.sendMessage(to, { document: buffer, mimetype, fileName: name });
