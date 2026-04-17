@@ -229,10 +229,14 @@ class PodcastTool(Tool):
         title_line = f"\nWorking title: {title}" if title else ""
 
         system = (
-            "You are a podcast scriptwriter. Produce a natural, engaging two-host "
+            "You are a podcast scriptwriter. Produce a natural, snappy two-host "
             "dialogue that summarizes the provided source for a busy listener. "
-            "Avoid filler, no introductions longer than one sentence, no outros "
-            "longer than one sentence. Keep each spoken line short (max 2 sentences). "
+            "It should sound like a real conversation between two friends, not "
+            "a read-aloud article. Use contractions, short sentences (8-18 words), "
+            "occasional interjections ('oh', 'echt waar?', 'precies', 'ja klopt'), "
+            "and genuine reactions. Vary line length and who speaks longer. "
+            "Avoid filler, avoid boring transitions, no introductions longer than "
+            "one sentence, no outros longer than one sentence. "
             "Output valid JSON ONLY: an array of objects with keys 'host' (one of: "
             + ", ".join(h.name for h in hosts)
             + ") and 'text'. No markdown, no code fences, no commentary."

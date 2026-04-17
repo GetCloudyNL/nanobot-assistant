@@ -220,13 +220,15 @@ class WhatsAppChannel(BaseChannel):
                     "mimetype": mime,
                     "fileName": media_path.rsplit("/", 1)[-1],
                 }
-                if mime.startswith("audio/") and media_path.lower().endswith((".ogg", ".opus")):
-                    payload["ptt"] = True
+                # Opus/ogg needs an explicit codec hint for WhatsApp clients
+                # (esp. iOS) to render an inline, scrubbable audio player.
+                if media_path.lower().endswith((".ogg", ".opus")):
+                    payload["mimetype"] = "audio/ogg; codecs=opus"
                 logger.info(
                     "Sending WhatsApp media to {}: path={} mime={} ptt={}",
                     chat_id,
                     media_path,
-                    mime,
+                    payload["mimetype"],
                     payload.get("ptt", False),
                 )
                 await self._ws.send(json.dumps(payload, ensure_ascii=False))

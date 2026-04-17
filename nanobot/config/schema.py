@@ -153,16 +153,23 @@ class PodcastToolConfig(Base):
                 name="Sanne",
                 voice="nova",
                 style=(
-                    "Speak as a warm, engaged Dutch podcast host. Conversational, "
-                    "curious, medium pace."
+                    "Spreek Nederlands als een professionele, levendige podcast-presentator. "
+                    "Natuurlijk tempo, iets sneller dan normaal voorleestempo, vlotte intonatie "
+                    "met echte spreekmelodie. Duidelijk geïnteresseerd en warm, nooit monotoon. "
+                    "Gebruik natuurlijke nadruk op sleutelwoorden en een kleine glimlach in "
+                    "je stem. Alsof je een vriend iets boeiends vertelt, niet alsof je een "
+                    "tekst voorleest."
                 ),
             ),
             PodcastHostConfig(
                 name="Daan",
                 voice="onyx",
                 style=(
-                    "Speak as a thoughtful, analytical Dutch podcast co-host. "
-                    "Calm, slightly lower register, reflective tone."
+                    "Spreek Nederlands als een scherpe, analytische co-host. "
+                    "Rustig maar energiek, iets sneller dan voorleestempo, met een warme "
+                    "lage stem en droge humor. Gebruik natuurlijke pauzes voor emphasis, "
+                    "maar nooit traag of plechtig. Reageer alsof je echt luistert; geen "
+                    "voordracht."
                 ),
             ),
         ]

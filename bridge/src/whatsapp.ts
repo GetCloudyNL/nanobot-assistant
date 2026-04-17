@@ -305,12 +305,13 @@ export class WhatsAppClient {
     } else if (category === 'video') {
       await this.sock.sendMessage(to, { video: buffer, caption: caption || undefined, mimetype });
     } else if (category === 'audio') {
-      // For opus/ogg audio WhatsApp-style voice notes render best with ptt=true.
-      // Fall back to a regular audio attachment otherwise.
+      // WhatsApp renders an inline audio player (with scrubber on iOS) when
+      // opus is used WITHOUT ptt. For .ogg/.opus we always advertise the
+      // opus codec so iOS/Android don't fall back to a generic file card.
       const audioMime = mimetype.includes('opus') ? mimetype : 'audio/ogg; codecs=opus';
       await this.sock.sendMessage(to, {
         audio: buffer,
-        mimetype: ptt ? audioMime : mimetype,
+        mimetype: audioMime,
         ptt: ptt === true,
       });
     } else {
