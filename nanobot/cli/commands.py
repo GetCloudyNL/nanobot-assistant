@@ -56,6 +56,47 @@ _PROMPT_SESSION: PromptSession | None = None
 _SAVED_TERM_ATTRS = None  # original termios settings, restored on exit
 
 
+def _whatsapp_guests_config(config):
+    """Return the WhatsApp guest configuration if the channel is active with guests."""
+    wa = getattr(config.channels, "whatsapp", None)
+    if wa is None:
+        return None
+    try:
+        from nanobot.channels.whatsapp import WhatsAppConfig
+
+        parsed = (
+            WhatsAppConfig.model_validate(wa)
+            if isinstance(wa, dict)
+            else wa
+        )
+    except Exception:
+        return None
+    if not getattr(parsed, "enabled", False):
+        return None
+    guests = getattr(parsed, "guests", None)
+    if guests is None:
+        return None
+    if not getattr(guests, "allowed", {}) and not getattr(guests, "blocked", []):
+        return None
+    return guests
+
+
+def _owner_whatsapp_chat_id(config) -> str | None:
+    """Return the owner's WhatsApp chat id (first allowFrom entry)."""
+    wa = getattr(config.channels, "whatsapp", None)
+    if wa is None:
+        return None
+    allow = (
+        wa.get("allowFrom") or wa.get("allow_from")
+        if isinstance(wa, dict)
+        else getattr(wa, "allow_from", None)
+    ) or []
+    for entry in allow:
+        if entry and entry != "*":
+            return str(entry)
+    return None
+
+
 def _flush_pending_tty_input() -> None:
     """Drop unread keypresses typed while the model was generating output."""
     try:
@@ -550,6 +591,10 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
+        podcast_config=config.tools.podcast,
+        openai_api_key=config.providers.openai.api_key,
+        whatsapp_guests=_whatsapp_guests_config(config),
+        owner_whatsapp_chat_id=_owner_whatsapp_chat_id(config),
     )
 
     # Set cron callback (needs agent)
@@ -755,6 +800,10 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
+        podcast_config=config.tools.podcast,
+        openai_api_key=config.providers.openai.api_key,
+        whatsapp_guests=_whatsapp_guests_config(config),
+        owner_whatsapp_chat_id=_owner_whatsapp_chat_id(config),
     )
 
     # Shared reference for progress callbacks

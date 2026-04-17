@@ -22,7 +22,10 @@ from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
+from nanobot.agent.tools.podcast import PodcastTool
 from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.agent.tools.relay import RelayToRalphTool
+from nanobot.agent.tools.schedule import ScheduleWithRalphTool
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
@@ -33,7 +36,13 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, WebSearchConfig
+    from nanobot.channels.whatsapp import WhatsAppGuestsConfig
+    from nanobot.config.schema import (
+        ChannelsConfig,
+        ExecToolConfig,
+        PodcastToolConfig,
+        WebSearchConfig,
+    )
     from nanobot.cron.service import CronService
 
 
@@ -68,8 +77,12 @@ class AgentLoop:
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
+        podcast_config: PodcastToolConfig | None = None,
+        openai_api_key: str | None = None,
+        whatsapp_guests: WhatsAppGuestsConfig | None = None,
+        owner_whatsapp_chat_id: str | None = None,
     ):
-        from nanobot.config.schema import ExecToolConfig, WebSearchConfig
+        from nanobot.config.schema import ExecToolConfig, PodcastToolConfig, WebSearchConfig
 
         self.bus = bus
         self.channels_config = channels_config
@@ -81,6 +94,10 @@ class AgentLoop:
         self.web_search_config = web_search_config or WebSearchConfig()
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
+        self.podcast_config = podcast_config or PodcastToolConfig()
+        self._openai_api_key = openai_api_key or ""
+        self.whatsapp_guests = whatsapp_guests
+        self.owner_whatsapp_chat_id = owner_whatsapp_chat_id
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self._start_time = time.time()
@@ -88,7 +105,8 @@ class AgentLoop:
 
         self.context = ContextBuilder(workspace, timezone=timezone)
         self.sessions = session_manager or SessionManager(workspace)
-        self.tools = ToolRegistry()
+        self.tools = ToolRegistry()  # Owner-scope (full access)
+        self.tools_guest = ToolRegistry()  # Guest-scope (appointment + relay only)
         self.runner = AgentRunner(provider)
         self.subagents = SubagentManager(
             provider=provider,
@@ -127,6 +145,10 @@ class AgentLoop:
         self._register_default_tools()
         self.commands = CommandRouter()
         register_builtin_commands(self.commands)
+        if self.whatsapp_guests is not None:
+            from nanobot.command.guests import register_guest_commands
+
+            register_guest_commands(self.commands)
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -149,6 +171,49 @@ class AgentLoop:
         if self.cron_service:
             self.tools.register(
                 CronTool(self.cron_service, default_timezone=self.context.timezone or "UTC")
+            )
+        if self.podcast_config.enabled:
+            try:
+                from nanobot.providers.tts import OpenAITTSProvider
+
+                tts_provider = OpenAITTSProvider(
+                    api_key=self._openai_api_key or None,
+                    model=self.podcast_config.model,
+                    audio_format=self.podcast_config.audio_format,
+                )
+                self.tools.register(
+                    PodcastTool(
+                        workspace=self.workspace,
+                        config=self.podcast_config,
+                        provider=self.provider,
+                        model=self.model,
+                        tts_provider=tts_provider,
+                        web_proxy=self.web_proxy,
+                    )
+                )
+            except Exception as e:
+                logger.warning("Podcast tool could not be registered: {}", e)
+
+        # Guest scope: only message + relay + schedule. No file/exec/web tools.
+        self.tools_guest.register(
+            MessageTool(send_callback=self.bus.publish_outbound)
+        )
+        if self.whatsapp_guests and self.owner_whatsapp_chat_id:
+            self.tools_guest.register(
+                RelayToRalphTool(
+                    send_callback=self.bus.publish_outbound,
+                    owner_chat_id=self.owner_whatsapp_chat_id,
+                )
+            )
+            self.tools_guest.register(
+                ScheduleWithRalphTool(
+                    workspace=self.workspace,
+                    meeting_defaults=self.whatsapp_guests.meeting_defaults,
+                    rate_limits=self.whatsapp_guests.rate_limits,
+                    send_callback=self.bus.publish_outbound,
+                    owner_chat_id=self.owner_whatsapp_chat_id,
+                    owner_tools=self.tools,
+                )
             )
 
     async def _connect_mcp(self) -> None:
@@ -173,12 +238,29 @@ class AgentLoop:
         finally:
             self._mcp_connecting = False
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    def _select_tools(self, role: str | None) -> ToolRegistry:
+        """Pick the tool registry matching the sender role."""
+        if role == "guest":
+            return self.tools_guest
+        return self.tools
+
+    def _set_tool_context(
+        self,
+        channel: str,
+        chat_id: str,
+        message_id: str | None = None,
+        *,
+        registry: ToolRegistry | None = None,
+    ) -> None:
         """Update context for all tools that need routing info."""
-        for name in ("message", "spawn", "cron"):
-            if tool := self.tools.get(name):
+        reg = registry or self.tools
+        for name in ("message", "spawn", "cron", "relay_to_ralph", "schedule_with_ralph"):
+            if tool := reg.get(name):
                 if hasattr(tool, "set_context"):
-                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+                    tool.set_context(
+                        channel, chat_id,
+                        *([message_id] if name == "message" else []),
+                    )
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -209,6 +291,7 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         message_id: str | None = None,
+        tools: ToolRegistry | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop.
 
@@ -252,14 +335,17 @@ class AgentLoop:
                 for tc in context.tool_calls:
                     args_str = json.dumps(tc.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tc.name, args_str[:200])
-                loop_self._set_tool_context(channel, chat_id, message_id)
+                loop_self._set_tool_context(
+                    channel, chat_id, message_id, registry=active_tools,
+                )
 
             def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
                 return loop_self._strip_think(content)
 
+        active_tools = tools or self.tools
         result = await self.runner.run(AgentRunSpec(
             initial_messages=initial_messages,
-            tools=self.tools,
+            tools=active_tools,
             model=self.model,
             max_iterations=self.max_iterations,
             hook=_LoopHook(),
@@ -427,16 +513,38 @@ class AgentLoop:
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
 
-        # Slash commands
+        role = (msg.metadata or {}).get("role", "owner")
+        active_tools = self._select_tools(role)
+
+        # Slash commands (owner-only to prevent guest fingerprinting via /status etc.)
         raw = msg.content.strip()
-        ctx = CommandContext(msg=msg, session=session, key=key, raw=raw, loop=self)
-        if result := await self.commands.dispatch(ctx):
-            return result
+        if role != "guest":
+            ctx = CommandContext(msg=msg, session=session, key=key, raw=raw, loop=self)
+            if result := await self.commands.dispatch(ctx):
+                return result
+        else:
+            if raw.startswith("/"):
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content="Daar kan ik je niet mee helpen.",
+                )
 
-        await self.memory_consolidator.maybe_consolidate_by_tokens(session)
+        if role != "guest":
+            await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
-        if message_tool := self.tools.get("message"):
+        self._set_tool_context(
+            msg.channel, msg.chat_id, msg.metadata.get("message_id"),
+            registry=active_tools,
+        )
+        if role == "guest":
+            phone = (msg.metadata or {}).get("phone") or msg.sender_id
+            name = (msg.metadata or {}).get("sender_name")
+            for tool_name in ("relay_to_ralph", "schedule_with_ralph"):
+                if (tool := active_tools.get(tool_name)) and hasattr(
+                    tool, "set_guest_identity"
+                ):
+                    tool.set_guest_identity(name, phone)
+        if message_tool := active_tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
@@ -448,6 +556,7 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id,
             sender_id=msg.sender_id,
             sender_name=(msg.metadata or {}).get("sender_name"),
+            role=role,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
@@ -465,6 +574,7 @@ class AgentLoop:
             on_stream_end=on_stream_end,
             channel=msg.channel, chat_id=msg.chat_id,
             message_id=msg.metadata.get("message_id"),
+            tools=active_tools,
         )
 
         if final_content is None:
@@ -472,9 +582,12 @@ class AgentLoop:
 
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
-        self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
+        if role != "guest":
+            self._schedule_background(
+                self.memory_consolidator.maybe_consolidate_by_tokens(session)
+            )
 
-        if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
+        if (mt := active_tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content

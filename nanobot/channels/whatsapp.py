@@ -29,6 +29,34 @@ def _path_looks_like_audio(path: str) -> bool:
     return ext in ("ogg", "opus", "m4a", "mp3", "wav", "aac", "webm")
 
 
+class MeetingDefaults(Base):
+    """Defaults for guest appointment requests."""
+
+    home_base: str = ""  # Address used as reference for travel time calculation
+    travel_time_buffer_minutes: int = 15
+    # Google Calendar account IDs (as configured in google-workspace MCP). Both are
+    # checked for conflicts; the agent proposes one based on topic.
+    calendar_accounts: list[str] = Field(default_factory=list)
+    default_short_duration_minutes: int = 30
+    default_long_duration_minutes: int = 60
+
+
+class GuestRateLimits(Base):
+    """Per-guest rate limits."""
+
+    messages_per_day: int = 30
+    appointment_requests_per_week: int = 2
+
+
+class WhatsAppGuestsConfig(Base):
+    """Guest access configuration."""
+
+    allowed: dict[str, str] = Field(default_factory=dict)  # phone -> display name
+    blocked: list[str] = Field(default_factory=list)
+    meeting_defaults: MeetingDefaults = Field(default_factory=MeetingDefaults)
+    rate_limits: GuestRateLimits = Field(default_factory=GuestRateLimits)
+
+
 class WhatsAppConfig(Base):
     """WhatsApp channel configuration."""
 
@@ -40,6 +68,8 @@ class WhatsAppConfig(Base):
     # knows who is talking. Example: {"31657571200": "Ralph van der Linden"}
     identities: dict[str, str] = Field(default_factory=dict)
     group_policy: Literal["open", "mention"] = "open"  # "open" responds to all, "mention" only when @mentioned
+    # Guest access: limited scope (scheduling and relaying messages only).
+    guests: WhatsAppGuestsConfig = Field(default_factory=WhatsAppGuestsConfig)
 
 
 class WhatsAppChannel(BaseChannel):
@@ -64,6 +94,17 @@ class WhatsAppChannel(BaseChannel):
         self._ws = None
         self._connected = False
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()
+
+    def is_allowed(self, sender_id: str) -> bool:
+        """Allow owners (allow_from) and configured guests."""
+        if super().is_allowed(sender_id):
+            return True
+        guests_cfg = getattr(self.config, "guests", None)
+        if guests_cfg is None:
+            return False
+        allowed = set((guests_cfg.allowed or {}).keys())
+        blocked = set(guests_cfg.blocked or [])
+        return sender_id in allowed and sender_id not in blocked
 
     async def login(self, force: bool = False) -> bool:
         """
@@ -260,7 +301,43 @@ class WhatsAppChannel(BaseChannel):
                     content = f"{content}\n{media_tag}" if content else media_tag
 
             identities = getattr(self.config, "identities", {}) or {}
-            sender_name = identities.get(sender_id) or identities.get(user_id)
+            guests_cfg = getattr(self.config, "guests", None)
+
+            # Guest-mode is only active when explicitly configured. If no
+            # guests are listed we keep the original behaviour (single-owner
+            # allowlist) so configs without guests/blocked sections behave
+            # exactly as before.
+            guests_configured = bool(
+                guests_cfg
+                and (getattr(guests_cfg, "allowed", None) or getattr(guests_cfg, "blocked", None))
+            )
+
+            role: str | None = "owner"
+            guest_name = ""
+            if guests_configured:
+                role, guest_name = self._resolve_role(sender_id, user_id, guests_cfg)
+                if role is None:
+                    logger.debug(
+                        "WhatsApp message silently dropped from unknown/blocked {}",
+                        sender_id,
+                    )
+                    return
+
+            sender_name = (
+                identities.get(sender_id)
+                or identities.get(user_id)
+                or guest_name
+                or None
+            )
+
+            if role == "guest":
+                if not self._guest_rate_limit_ok(sender_id, sender_name or ""):
+                    logger.info(
+                        "Rate limit hit for guest {}; sending polite decline",
+                        sender_id,
+                    )
+                    await self._send_rate_limit_notice(sender)
+                    return
 
             await self._handle_message(
                 sender_id=sender_id,
@@ -272,25 +349,93 @@ class WhatsAppChannel(BaseChannel):
                     "timestamp": data.get("timestamp"),
                     "is_group": data.get("isGroup", False),
                     "sender_name": sender_name,
+                    "role": role,
+                    "phone": sender_id,
                 },
             )
+            return
 
-        elif msg_type == "status":
-            # Connection status update
+        if msg_type == "status":
             status = data.get("status")
             logger.info("WhatsApp status: {}", status)
-
             if status == "connected":
                 self._connected = True
             elif status == "disconnected":
                 self._connected = False
+            return
 
-        elif msg_type == "qr":
-            # QR code for authentication
+        if msg_type == "qr":
             logger.info("Scan QR code in the bridge terminal to connect WhatsApp")
+            return
 
-        elif msg_type == "error":
+        if msg_type == "error":
             logger.error("WhatsApp bridge error: {}", data.get("error"))
+            return
+
+    def _resolve_role(
+        self,
+        sender_id: str,
+        user_id: str,
+        guests_cfg: Any,
+    ) -> tuple[str | None, str]:
+        """Return (role, guest_display_name)."""
+        if sender_id in (self.config.allow_from or []) or user_id in (
+            self.config.allow_from or []
+        ):
+            return "owner", ""
+        if guests_cfg is None:
+            return None, ""
+        blocked = set(guests_cfg.blocked or [])
+        if sender_id in blocked or user_id in blocked:
+            return None, ""
+        allowed = dict(guests_cfg.allowed or {})
+        if sender_id in allowed:
+            return "guest", allowed[sender_id]
+        if user_id in allowed:
+            return "guest", allowed[user_id]
+        return None, ""
+
+    def _guest_rate_limit_ok(self, phone: str, name: str) -> bool:
+        """Record an inbound guest message; return False if over quota."""
+        workspace = self._resolve_workspace()
+        if workspace is None:
+            return True  # Don't block if we can't persist state
+
+        from nanobot.agent.guest import GuestUsageStore
+
+        store = GuestUsageStore(workspace)
+        usage = store.load(phone, name=name)
+        limits = getattr(
+            self.config.guests, "rate_limits", None
+        ) if hasattr(self.config, "guests") else None
+        cap = getattr(limits, "messages_per_day", 30) if limits else 30
+        if usage.message_count_last_day() >= cap:
+            return False
+        usage.record_message()
+        store.save(usage)
+        return True
+
+    async def _send_rate_limit_notice(self, chat_id: str) -> None:
+        """Send a polite rate-limit message without invoking the agent."""
+        if not self._ws or not self._connected:
+            return
+        try:
+            payload = {
+                "type": "send",
+                "to": chat_id,
+                "text": (
+                    "Dankjewel voor je bericht! Je hebt voor vandaag het maximum "
+                    "bereikt. Ralph krijgt dit door; hij neemt morgen contact op "
+                    "als het nodig is."
+                ),
+            }
+            await self._ws.send(json.dumps(payload, ensure_ascii=False))
+        except Exception as e:
+            logger.debug("Could not send rate-limit notice: {}", e)
+
+    def _resolve_workspace(self) -> Path | None:
+        """Resolve the workspace directory for guest-state storage."""
+        return self.workspace
 
 
 def _find_bridge_source() -> Path | None:

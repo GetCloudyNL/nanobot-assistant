@@ -129,6 +129,45 @@ class ExecToolConfig(Base):
     timeout: int = 60
     path_append: str = ""
 
+
+class PodcastHostConfig(Base):
+    """Single host persona for the podcast tool."""
+
+    name: str = "Host"
+    voice: str = "nova"  # Provider-specific voice id
+    # Optional style hint passed as 'instructions' to the TTS provider.
+    style: str = ""
+
+
+class PodcastToolConfig(Base):
+    """Configuration for the podcast tool (fetch + summarize + TTS)."""
+
+    enabled: bool = False
+    provider: Literal["openai"] = "openai"
+    model: str = "gpt-4o-mini-tts"
+    audio_format: Literal["opus", "mp3", "wav", "aac"] = "opus"
+    language: str = "nl"  # Default output language (ISO code)
+    hosts: list[PodcastHostConfig] = Field(
+        default_factory=lambda: [
+            PodcastHostConfig(
+                name="Sanne",
+                voice="nova",
+                style=(
+                    "Speak as a warm, engaged Dutch podcast host. Conversational, "
+                    "curious, medium pace."
+                ),
+            ),
+            PodcastHostConfig(
+                name="Daan",
+                voice="onyx",
+                style=(
+                    "Speak as a thoughtful, analytical Dutch podcast co-host. "
+                    "Calm, slightly lower register, reflective tone."
+                ),
+            ),
+        ]
+    )
+
 class MCPServerConfig(Base):
     """MCP server connection configuration (stdio or HTTP)."""
 
@@ -146,6 +185,7 @@ class ToolsConfig(Base):
 
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    podcast: PodcastToolConfig = Field(default_factory=PodcastToolConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 

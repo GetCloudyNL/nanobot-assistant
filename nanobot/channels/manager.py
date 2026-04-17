@@ -55,6 +55,7 @@ class ChannelManager:
             try:
                 channel = cls(section, self.bus)
                 channel.transcription_api_key = groq_key
+                channel.workspace = getattr(self.config, "workspace_path", None)
                 self.channels[name] = channel
                 if name == "whatsapp" and not groq_key.strip():
                     logger.warning(
